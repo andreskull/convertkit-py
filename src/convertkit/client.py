@@ -1,5 +1,6 @@
 import requests
 import numpy as np
+import time
 from .exceptions import ConvertKitAPIError
 
 class ConvertKit:
@@ -16,10 +17,47 @@ class ConvertKit:
         """
         self.api_key = api_key
         self.api_secret = api_secret
+        self.last_request_time = 0
+        self.min_request_interval = 0.5  # 500ms between requests
         if form_name:
             self.form_id = self.get_form_id_by_name(form_name)
             if not self.form_id:
                 print(f"Form '{form_name}' not found. Available forms:")
+    
+    def _make_request(self, method, url, **kwargs):
+        """
+        Make a rate-limited request to the ConvertKit API.
+        
+        Args:
+            method (str): HTTP method ('get', 'post', 'put', 'delete')
+            url (str): API endpoint URL
+            **kwargs: Additional arguments to pass to requests
+            
+        Returns:
+            requests.Response: API response
+        """
+        # Ensure minimum time between requests
+        current_time = time.time()
+        time_since_last_request = current_time - self.last_request_time
+        if time_since_last_request < self.min_request_interval:
+            time.sleep(self.min_request_interval - time_since_last_request)
+        
+        try:
+            response = getattr(requests, method.lower())(url, **kwargs)
+            self.last_request_time = time.time()
+            
+            if response.status_code == 429:
+                # Rate limit hit - wait 5 seconds and retry
+                print(f"Rate limit hit, waiting 5 seconds...")
+                time.sleep(5)
+                response = getattr(requests, method.lower())(url, **kwargs)
+                self.last_request_time = time.time()
+            
+            return response
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {str(e)}")
+            raise
     
     def list_custom_fields(self):
         """
@@ -31,7 +69,7 @@ class ConvertKit:
         url = f"{self.BASE_URL}/custom_fields"
         params = {'api_key': self.api_key}
         
-        response = requests.get(url, params=params)
+        response = self._make_request('get', url, params=params)
         if response.status_code == 200:
             return response.json().get('custom_fields', [])
         else:
@@ -59,7 +97,7 @@ class ConvertKit:
             'label': new_labels
         }
         
-        response = requests.post(url, headers=headers, json=data)
+        response = self._make_request('post', url, headers=headers, json=data)
         if response.status_code == 200:
             print("Custom fields created successfully.")
         else:
@@ -75,7 +113,7 @@ class ConvertKit:
         url = f"{self.BASE_URL}/tags"
         params = {'api_key': self.api_key}
         
-        response = requests.get(url, params=params)
+        response = self._make_request('get', url, params=params)
         if response.status_code == 200:
             return response.json().get('tags', [])
         else:
@@ -112,7 +150,7 @@ class ConvertKit:
             'tag': [{'name': tag_name} for tag_name in new_tags]
         }
         
-        response = requests.post(url, headers=headers, json=data)
+        response = self._make_request('post', url, headers=headers, json=data)
         if response.status_code == 200:
             print("Tags created successfully.")
             return response.json()
@@ -162,7 +200,7 @@ class ConvertKit:
         if email_address:
             params['email_address'] = email_address
             
-        response = requests.get(url, params=params)
+        response = self._make_request('get', url, params=params)
         if response.status_code == 200:
             return response.json()
         else:
@@ -218,7 +256,7 @@ class ConvertKit:
         url = f"{self.BASE_URL}/subscribers/{subscriber_id}/tags"
         params = {'api_key': self.api_key}
         
-        response = requests.get(url, params=params)
+        response = self._make_request('get', url, params=params)
         if response.status_code == 200:
             return response.json().get('tags', [])
         else:
@@ -297,11 +335,12 @@ class ConvertKit:
         data = {
             'api_key': self.api_key,
             'email': subscriber_data['email'],
+            'first_name': subscriber_data['first_name'],
             'fields': subscriber_data['fields'],
             'tags': tag_ids  # Send tag IDs instead of names
         }  
         
-        response = requests.post(url, json=data)
+        response = self._make_request('post', url, json=data)
         if response.status_code == 200:
             subscriber_id = response.json()['subscription']['subscriber']['id']
             print(f"Subscriber {subscriber_data['email']} added with ID: {subscriber_id}")
@@ -323,7 +362,7 @@ class ConvertKit:
             'fields': update_data['fields']
         }
         
-        response = requests.put(url, json=data)
+        response = self._make_request('put', url, json=data)
         if response.status_code != 200:
             response.raise_for_status()
             
@@ -391,7 +430,7 @@ class ConvertKit:
                     'email': subscriber_email
                 }
                 
-                response = requests.post(url, json=data)
+                response = self._make_request('post', url, json=data)
                 if response.status_code != 200:
                     print(f"Error adding tag '{tag_name}' to subscriber {subscriber_email}: {response.text}")
                     response.raise_for_status()
@@ -425,7 +464,7 @@ class ConvertKit:
                     'email': subscriber_email
                 }
                 
-                response = requests.post(url, json=data)  # Note: it's POST, not DELETE
+                response = self._make_request('post', url, json=data)  # Note: it's POST, not DELETE
                 if response.status_code != 200:
                     print(f"Error removing tag '{tag_name}' from subscriber {subscriber_email}: {response.text}")
                     response.raise_for_status()
@@ -444,7 +483,7 @@ class ConvertKit:
         url = f"{self.BASE_URL}/forms"
         params = {'api_key': self.api_key}
         
-        response = requests.get(url, params=params)
+        response = self._make_request('get', url, params=params)
         if response.status_code == 200:
             return response.json().get('forms', [])
         else:
@@ -471,4 +510,48 @@ class ConvertKit:
         for form in forms:
             print(f"- {form['name']}")
         return None
+
+    def delete_custom_field(self, field_id):
+        """
+        Delete a custom field by its ID.
+        
+        Args:
+            field_id (int): The ID of the custom field to delete
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        url = f"{self.BASE_URL}/custom_fields/{field_id}"
+        headers = {'Content-Type': 'application/json'}
+        data = {
+            'api_secret': self.api_secret
+        }
+        
+        response = self._make_request('delete', url, headers=headers, json=data)
+        if response.status_code == 204:  # No content is returned on success
+            print(f"Custom field {field_id} deleted successfully.")
+            return True
+        else:
+            print(f"Failed to delete custom field {field_id}. Status code: {response.status_code}")
+            response.raise_for_status()
+            return False
+
+    def delete_custom_field_by_name(self, field_name):
+        """
+        Delete a custom field by its name/label.
+        
+        Args:
+            field_name (str): The name/label of the custom field to delete
+            
+        Returns:
+            bool: True if successful, False if field not found or deletion failed
+        """
+        existing_fields = self.list_custom_fields()
+        
+        for field in existing_fields:
+            if field['label'].lower() == field_name.lower():
+                return self.delete_custom_field(field['id'])
+        
+        print(f"Custom field '{field_name}' not found.")
+        return False
 
